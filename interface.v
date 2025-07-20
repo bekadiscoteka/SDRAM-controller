@@ -17,7 +17,7 @@
 	module sdram_interface #(
 		parameter	CLK_FREQ=133, 		// 143 or 133
 				BURST_LENGTH = 1,
-				BURST_TYPE = "SEQ",  	// SEQ = sequential 
+				INTERLEAVED = 0,  	// SEQ = sequential 
 						     	// INTR = interleaved	
 				BURST_WR_MODE = 0  	// 0 = burst applied to READ operation only
 						       	// 1 = applied to both
@@ -54,7 +54,8 @@
 
 							// ALL LATENCIES 
 	
-		localparam	CAS = (CLK_FREQ == 143) ? 3 : 2,
+		localparam integer	
+				CAS = (CLK_FREQ == 143) ? 3 : 2,
 				MRD = 2,
 				DMD = 0, 
 				QMD = 2,
@@ -94,17 +95,24 @@
 		reg 		_read, 
 				_write, 		// registering the input
 				refresh,
+				valid_in,
 			 	warning;		// stop light for all operations, refresh is about to happen	
-		reg [3:0]	_delay,        		// delay parameter that can be passed between states
+		reg [3:0]	delay,        		// delay parameter that can be passed between states
 			 	init_state,
 				state,
-				burst_state;	
+				burst_counter,
+				burst_finish;
+		reg [7:0] 	valid_pipe;
 		reg [24:0] 	_address;
 		reg [15:0] 	_data_in;
 		
-		assign DRAM_DQ = (_write && state == ACTIVE) ? _data_in : 16'bz;
+		assign DRAM_DQ = (state == WRITE) ? _data_in : 16'bz;
 		assign DRAM_CLK = clk;
 		assign data_out = DRAM_DQ;	
+		
+		wire burst_read_ready = burst_counter == burst_finish;
+		wire burst_pre_ready = burst_read_ready && !valid_pipe[CAS-RP:0]; // assume RP < CAS always
+		wire valid_trigger = (_read && state == ACTIVE);
 
 							// refresh logic goes
 							// purpose: track the refresh period and send warning if it
@@ -135,7 +143,6 @@
 		always @(posedge clk, posedge reset) begin
 			if (reset) begin
 				state <= INIT;
-				burst_state <= IDLE;
 				init_state <= PRE_PALL;
 				counter <= 0;
 				autoref_counter <= 0;
@@ -152,138 +159,129 @@
 
 				valid <= 0;
 				ready <= 0;
-				_delay <= 0;
+				delay <= 13300; // latency(100e-6) fixed latency for specific sdram boot
 				_read <= 0;
 				_write <= 0;
 				_address <= 0;
+
+				burst_finish <= 0;
+				burst_counter <= 0;
+				valid_pipe <= 0;
+				valid_in <= 0;
 				
 			end
 			else begin
+			       	if (counter == delay) begin 
 				case (state)
 					INIT: begin
 						case (init_state)	
 							PRE_PALL: begin
-								if (counter == 13300) begin //latency(100e-6)
-									DO_PALL();
-									init_state <= PALL;
-								end
-								else NOP();
+								DO_PALL(RP);
+								init_state <= PALL;
 							end
 							PALL: begin
-								if (counter == RP) begin
-									DO_AREF();
-									init_state <= AREF;
-								end
-								else NOP();
+								DO_AREF(RC);
+								init_state <= AREF;
 							end
 							AREF: begin 
-								if (counter == RC) begin
-									autoref_counter <= autoref_counter + 1;
-									if (&autoref_counter) begin
-										DO_LMR();
-										init_state <= LMR;
-									end
-									else DO_AREF();
+								autoref_counter <= autoref_counter + 1;
+								if (&autoref_counter) begin
+									DO_LMR(MRD);
+									init_state <= LMR;
 								end
-								else NOP();
+								else DO_AREF(RC);
 							end
-							LMR: if (counter == MRD) begin
+							LMR: begin 
 								state <= IDLE;  
 								counter <= 0;
-								_delay <= 0;
+								delay <= 0;
 							end
-							else NOP();
 						endcase
 					end
 					
 					// operating mode
 
 					IDLE: begin
-						if (counter == _delay) begin
-							if (warning) begin
-								ready <= 0;
-							end
-							else if (refresh) begin
-								DO_AREF();
-								_delay <= RC; 
-							end
-							else if ((write ^ read)) begin
-								_write <= write;
-								_read <= read;
-								_data_in <= data_in;
-								_address <= address;
-								DO_ACTIVE();
-								_delay <= RCD;
-								ready <= 0;
-							end							
-							else begin
-								ready <= 1;
-							end
+						if (warning) begin
+							ready <= 0;
 						end
-						else NOP();
+						else if (refresh) DO_AREF(RC);
+						else if ((write ^ read)) begin
+
+							// in future
+							// this block
+							// will be
+							// separate
+							// task	
+							_write <= write;
+							_read <= read;
+							_data_in <= data_in;
+							_address <= address;
+
+							DO_ACTIVE(RCD);
+							state <= ACTIVE;
+							ready <= 0;
+						end							
+						else begin
+						       	ready <= 1;
+							_write <= 0;
+						end
 					end
 					ACTIVE: begin
-						if (counter == _delay) begin
-							if (_write) begin
-							       	DO_WRITE();
-								_delay <= 0;
-							end
-							else if (_read) begin
-							       	DO_READ(); 
-								_delay <= CAS;
-							end
-						end	
-						else NOP();
+						if (_write) begin
+							DO_WRITE(0);
+							state <= WRITE;
+						end
+						else if (_read) begin
+							DO_READ(0);
+							BURST_START();
+							state <= READ;
+						end
+							/*
+							* 
+							*/
 					end
 					READ: begin
-						if (counter == _delay) begin
-							PRE();
-
-							_delay <= RP;
-
-							/*
-							if (BURST_LENGTH > RP) begin
-								if (BURST_LENGTH - PR - 1) begin
-									PRE(address[14:13]);
-									_delay <= PR;
-								end
-							end
-							else PRE(address[14:13]);
-							*/
-							
-						       
-
-						end
-						else if (counter == _delay-1) begin
-							burst_state <= READ;
-							NOP();
-						end
+						if (burst_read_ready) valid_in <= 0;
+						if (burst_pre_ready) begin
+							PRE(RP);
+							state <= IDLE;	
+						end											
 						else NOP();
+							
 					end
 					WRITE: begin
-					       	PRE();
-						_delay <= RP;
+						PRE(RP);
+						state <= IDLE;
 					end
-
 				endcase	
-				
-				// burst logic
+			end
+			else begin
+			       	NOP();
+				counter <= counter + 1;
+			end
+			
+			//	BURST LOGIC	
+			// ---------------------------------------------------
 
-				case (burst_state) 
-					IDLE: begin
-						valid <= 0;
-					end
-					READ: begin
-						valid <= 1;
-						// it should count up to burst
-						// length
+			burst_counter <= (burst_counter == burst_finish) ? burst_counter : 
+									   burst_counter + 1;
 
-						burst_state <= IDLE;
-					end
-				endcase
+			//	valid signal pipeline	
+			
+			valid_pipe[7:1] <= {valid_pipe[6:1], valid_in};
+			valid <= valid_pipe[CAS]; 
 
+			//----------------------------------------------------
 			end
 		end
+
+		task BURST_START;
+			begin
+				burst_finish <= burst_finish + BURST_LENGTH - 1;	
+				valid_in <= 1;
+			end
+		endtask
 
 		task NOP;
 			begin
@@ -291,11 +289,10 @@
 				DRAM_nRAS <= 1;
 				DRAM_nCAS <= 1;
 				DRAM_nWE <= 1;	
-				counter <= counter + 1;
 			end
 		endtask
 		
-		task DO_PALL;
+		task DO_PALL(input integer _delay);
 			begin
 				DRAM_nCS <= 0;
 				DRAM_nRAS <= 0; 
@@ -303,11 +300,13 @@
 				DRAM_nWE <= 0;	
 				DRAM_ADDR[10] <= 1;
 				counter <= 0;
+
+				delay <= _delay; 
 			end
 
 		endtask
 
-		task DO_AREF;
+		task DO_AREF(input integer _delay);
 			begin
 				DRAM_CKE <= 1;
 				DRAM_nCS <= 0;
@@ -315,23 +314,25 @@
 				DRAM_nCAS <= 0;
 				DRAM_nWE <= 1;	
 				counter <= 0;			
+				delay <= _delay;
 			end
 		endtask	
 
-		task DO_LMR;
+		task DO_LMR(input integer _delay);
 			begin
 				DRAM_nCS <= 0;
 				DRAM_nRAS <= 0; 
 				DRAM_nCAS <= 0;
 				DRAM_nWE <= 0;	
 				DRAM_BA <= 0;
+				delay <= _delay;
 
 				`LOAD_BURST_LENGTH <=	BURST_LENGTH == 1 ? 0 :
 							BURST_LENGTH == 2 ? 1 :
 							BURST_LENGTH == 4 ? 2 :
-							BURST_LENGTH == 8 ? 3 : 1;	
+							BURST_LENGTH == 8 ? 3 : 0;	
 
-				`LOAD_BURST_TYPE <=	BURST_TYPE == "INTR" ? 1 : 0;
+				`LOAD_BURST_TYPE <= INTERLEAVED;
 				`LOAD_BURST_WR_MODE <=	BURST_WR_MODE == 1 ? 0 : 1;
 				`LOAD_CAS <= 		CAS;
 
@@ -339,7 +340,7 @@
 			end
 		endtask	
 
-		task DO_ACTIVE;
+		task DO_ACTIVE(input integer _delay);
 			begin
 				DRAM_nCS <= 0;
 				DRAM_nRAS <= 0; 
@@ -348,12 +349,12 @@
 				DRAM_BA <= `BANK_ADDR;
 				DRAM_ADDR <= `ROW_ADDR;	
 
-				state <= ACTIVE;
+				delay <= _delay;
 				counter <= 0;
 			end
 		endtask
 
-		task DO_READ;
+		task DO_READ(input integer _delay);
 			begin
 				DRAM_nCS <= 0;
 				DRAM_nRAS <= 1; 
@@ -363,12 +364,12 @@
 				DRAM_ADDR[9:0] <= `COLUMN_ADDR;
 				DRAM_ADDR[10] <= 0; // fixed for now
 
-				state <= READ;
 				counter <= 0;
+				delay <= _delay;
 			end
 		endtask
 
-		task DO_WRITE;
+		task DO_WRITE(input integer _delay);
 			begin
 				DRAM_nCS <= 0;
 				DRAM_nRAS <= 1; 
@@ -378,12 +379,12 @@
 				DRAM_ADDR[9:0] <= `COLUMN_ADDR;
 				DRAM_ADDR[10] <= 0; // fixed for now
 
-				state <= WRITE;
+				delay <= _delay;
 				counter <= 0;
 			end
 		endtask
 
-		task PRE;
+		task PRE(input integer _delay);
 			begin
 				DRAM_nCS <= 0;
 				DRAM_nRAS <= 0; 
@@ -392,7 +393,7 @@
 				DRAM_ADDR[10] <= 0;
 				DRAM_BA <= `BANK_ADDR;
 				
-				state <= IDLE;
+				delay <= _delay;
 				counter <= 0;
 			end
 		endtask
