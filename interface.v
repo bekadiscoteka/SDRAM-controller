@@ -1,9 +1,12 @@
-
+//burst write doesn't consider that DQ accepts data after cycle WRITE(), not at the same
+//
 `ifndef SDRAM_CTRL
 
 	`define	SDRAM_CTRL
 
-							// designed for sdram from issi with speed -7 inside of terasic de10 lite 
+	`include "synch_fifo.v"
+
+								// designed for sdram from issi with speed -7 inside of terasic de10 lite 
 	
 	`define LOAD_BURST_LENGTH	DRAM_ADDR[2:0]
 	`define LOAD_BURST_TYPE 	DRAM_ADDR[3]	
@@ -13,24 +16,29 @@
 	`define BANK_ADDR 		_address[24:23]
 	`define ROW_ADDR 		_address[22:10]
         `define COLUMN_ADDR 		_address[9:0]	
+
 	
 	module sdram_interface #(
 		parameter	CLK_FREQ=133, 		// 143 or 133
-				BURST_LENGTH = 1,
-				INTERLEAVED = 0,  	// SEQ = sequential 
+				BURST_LENGTH = 4,
+				BURST_TYPE = "SEQ",  	// SEQ = sequential 
 						     	// INTR = interleaved	
-				BURST_WR_MODE = 0  	// 0 = burst applied to READ operation only
+				BURST_WR_MODE = 0	// 0 = burst applied to READ operation only
 						       	// 1 = applied to both
 	)(
 							// interface
-		output reg	ready, 			// ready for accepting command
-				valid, 			// data out is valid 
+		output reg	valid, 			// ready for accepting command
+		output 		ready,
 		output [15:0]	data_out,
 		input  [24:0]	address,
 		input  [15:0]	data_in,
 		input 		read,
 		input 		write,
 		input 		clk,
+
+		`ifdef	TEST
+				start,
+		`endif
 				//turn_on,
 				reset,
 
@@ -92,48 +100,185 @@
 		reg [log2(AUTO_REFRESH_T)-1:0]	REFRESH_COUNTER; 
 		reg [log2(13300)-1:0] counter; 
 		reg [2:0] 	autoref_counter;
-		reg 		_read, 
-				_write, 		// registering the input
-				refresh,
-				valid_in,
-			 	warning;		// stop light for all operations, refresh is about to happen	
+
+
+		wire warn_signal = REFRESH_COUNTER >= WARNING;
+		wire refresh = REFRESH_COUNTER == AUTO_REFRESH_T;
+	
+	
+		wire	cmd_empty,
+			cmd_valid,
+			cmd_full;
+			
+
+
+ 		// registering the input
+		// stop light for all operations, refresh is about to happen	
+			
 		reg [3:0]	delay,        		// delay parameter that can be passed between states
 			 	init_state,
-				state,
-				burst_counter,
-				burst_finish;
-		reg [7:0] 	valid_pipe;
-		reg [24:0] 	_address;
+				state;
+		wire [24:0] 	_address;
 		reg [15:0] 	_data_in;
-		
-		assign DRAM_DQ = (state == WRITE) ? _data_in : 16'bz;
+		wire [15:0]	fifo_data_in;
+		wire 		_write,
+				_read;
+
+		wire [(2+13)-1:0]	current_bank_row  = {`BANK_ADDR, `ROW_ADDR};
+		reg [(2+13)-1:0]	prev_bank_row;
+
+
+
+		reg 	valid_in;
+		reg	[3:0] 	burstRead_counter,
+				burstRead_finish;
+		reg 	[7:0] 	valid_pipe;		
+		wire 	burstRead_read_ready 	= burstRead_counter == burstRead_finish;
+		wire 	burstRead_done 	  	= !( |{ valid_pipe[CAS:1], valid_in } ); 	// {valid_pipe[CAS:1], valid_in} == 0;
+		wire 	burstRead_PRE_ready  	= burstRead_read_ready && !valid_pipe[CAS-RP:0];// assume RP < CAS always
+
+
+
+		reg	[3:0]	burstWrite_counter,
+				burstWrite_finish;
+		wire	burstWrite_done	= burstWrite_counter == burstWrite_finish;
+		wire 	burstWrite_PRE_ready = burstWrite_done;	// only for now
+
+
+
+		assign ready 	= !cmd_full && ( state != INIT ) && !warn_signal && !refresh;
+		assign DRAM_DQ 	= !burstWrite_done ? _data_in : 16'bz;
 		assign DRAM_CLK = clk;
 		assign data_out = DRAM_DQ;	
+
+		reg fetch;
+
+
+		generate 
+			if (BURST_WR_MODE) begin
+				always @* begin
+				    fetch = 1'b0;  // default
+
+				    if (delay == counter `ifdef TEST && start `endif) begin
+					if (warn_signal && burstWrite_done) fetch = 0;
+					// ACTIVE state case
+					else if (!cmd_valid) fetch = 1;
+					else if (state == ACTIVE) begin	
+						if (!burstWrite_done && (burstWrite_counter != burstWrite_finish - 1)) begin
+							if (_write) fetch = 1;		
+						end
+					    	else if (prev_bank_row == current_bank_row) begin
+						    if (_write) begin
+							if (burstRead_done && burstWrite_done)
+							    fetch = 1'b1;
+						    end
+					    	else if (_read) begin
+							if (burstWrite_done && burstRead_done)
+						    	fetch = 1'b1;
+					    	end
+					    end
+					end
+					
+					// IDLE state case
+					else if (state == IDLE && !refresh && !warn_signal) begin
+					    if (!_write && !_read)
+						fetch = 1'b1;
+					end
+				    end
+				end
+			end
+			else begin
+				always @* begin
+				    fetch = 1'b0;  // default
+
+				    if (delay == counter `ifdef TEST && start `endif) begin
+					if (warn_signal && burstWrite_done) fetch = 0;
+					// ACTIVE state case
+					else if (!cmd_valid) fetch = 1;
+					else if (state == ACTIVE) begin
+					    if ((prev_bank_row == current_bank_row) && cmd_valid) begin
+						    if (_write) begin
+							if (burstRead_done && burstWrite_done)
+							    fetch = 1'b1;
+						    end
+						    else if (_read) begin
+							if (burstWrite_done && burstRead_done)
+							    fetch = 1'b1;
+						    end
+					    end
+					end
+					
+					// IDLE state case
+					else if (state == IDLE && !refresh && !warn_signal) begin
+					    if (!_write && !_read)
+						fetch = 1'b1;
+					end
+				    end
+				end
+		end
+		endgenerate
+
+	
+/*
+		wire fetch =	((((	state == ACTIVE 			) &&
+				(	prev_bank_row == current_bank_row	)) &&
+
+
+				(((	_write 					) &&
+				(	burstRead_done && burstWrite_done	)) || 
+
+				((	_read					) &&
+				(	burstWrite_done && burstRead_read_ready	)))) ||
+
+				(( 	state == IDLE && !refresh && !warn_signal	) &&
+				(	(!_write && !_read)	 		))) &&
+				(	delay == counter 			);
+
+*/				
 		
-		wire burst_read_ready = burst_counter == burst_finish;
-		wire burst_pre_ready = burst_read_ready && !valid_pipe[CAS-RP:0]; // assume RP < CAS always
-		wire valid_trigger = (_read && state == ACTIVE);
+	 
+
+
+
+		//	=============================================================
+		//  	||	COMMAND REGISTRATION 				   ||	
+		//  	---------------------------------------------------------------
+		// 	||	purpose: register every incoming command, save until ||
+		// 	||	they are execute
+		// 	===============================================================
+				
+		synch_fifo #(
+		    .DEPTH(512),
+		    .DATA_WIDTH(43)
+		) fifo_inst (
+		    .clk       	( clk ),
+		    .rst_n      ( ~reset ), // assuming reset is active-low
+		    .data_in   	( { data_in, address, write, read } ), // ensure this is 43 bits total
+		    .data_out  	( { fifo_data_in, _address, _write, _read } ), // same, must match 43
+		    .w_en      	( write ^ read ), // or (write && !read)
+		    .r_en      	( fetch ),
+		    .empty     	( cmd_empty ),
+		    .full      	( cmd_full ),
+		    .valid	( cmd_valid )
+		);
+		
+
+		
 
 							// refresh logic goes
-							// purpose: track the refresh period and send warning if it
+							// purpose: track the refresh period and send warn_signal if it
 							// is close. Eventually call auto refresh
+
 
 		always @(posedge clk, posedge reset) begin
 			if (reset) begin
 				REFRESH_COUNTER <= 0;
-				warning <= 0;
 			end	
 			else begin
-				REFRESH_COUNTER <= state != INIT ? REFRESH_COUNTER + 1 : 0;
-				if (REFRESH_COUNTER >= WARNING) warning <= 1;	
 				if (REFRESH_COUNTER == AUTO_REFRESH_T) begin
-					refresh <= 1;
 					REFRESH_COUNTER <= 0;
 				end
-				else begin
-				       	warning <= 0;
-					refresh <= 0;
-				end
+				else 	REFRESH_COUNTER <= state != INIT ? REFRESH_COUNTER + 1 : 0;
 			end
 		end
 
@@ -158,16 +303,17 @@
 				DRAM_BA <= 0;
 
 				valid <= 0;
-				ready <= 0;
 				delay <= 13300; // latency(100e-6) fixed latency for specific sdram boot
-				_read <= 0;
-				_write <= 0;
-				_address <= 0;
 
-				burst_finish <= 0;
-				burst_counter <= 0;
+				burstRead_finish <= 0;
+				burstRead_counter <= 0;
 				valid_pipe <= 0;
 				valid_in <= 0;
+
+				prev_bank_row <= 0;
+
+				burstWrite_finish <= 0;
+				burstWrite_counter <= 0;
 				
 			end
 			else begin
@@ -202,57 +348,58 @@
 					// operating mode
 
 					IDLE: begin
-						if (warning) begin
-							ready <= 0;
+						if ( refresh ) begin
+							DO_AREF(RC);
+							$display("refreshing");
 						end
-						else if (refresh) DO_AREF(RC);
-						else if ((write ^ read)) begin
-
-							// in future
-							// this block
-							// will be
-							// separate
-							// task	
-							_write <= write;
-							_read <= read;
-							_data_in <= data_in;
-							_address <= address;
-
-							DO_ACTIVE(RCD);
-							state <= ACTIVE;
-							ready <= 0;
-						end							
+						else if ( warn_signal ) NOP();
 						else begin
-						       	ready <= 1;
-							_write <= 0;
-						end
+							if ( _write ^ _read ) begin
+								DO_ACTIVE(RCD);
+								state <= ACTIVE;
+								prev_bank_row <= current_bank_row;
+							end
+						end	
 					end
 					ACTIVE: begin
-						if (_write) begin
-							DO_WRITE(0);
-							state <= WRITE;
+						if ( warn_signal) begin
+							if (burstWrite_done) begin
+								PRE(RP);
+								state <= IDLE;
+							end
 						end
-						else if (_read) begin
-							DO_READ(0);
-							BURST_START();
-							state <= READ;
+						else if (cmd_valid `ifdef TEST && start `endif) begin
+							if ( ( prev_bank_row == current_bank_row )) begin 
+								if ( _write ) begin
+									if ( burstWrite_done && burstRead_done ) begin
+										$display("write active");
+										DO_WRITE(0);
+										BURST_WRITE_START();
+
+										// fetch is high automatically here
+										prev_bank_row <= {`BANK_ADDR, `ROW_ADDR}; 
+									end	
+									else NOP();
+								end
+								else if ( _read ) begin
+									if ( burstWrite_done && burstRead_done ) begin
+										DO_READ(0);
+										BURST_READ_START();
+
+										// fetch is high automatically here
+										prev_bank_row <= {`BANK_ADDR, `ROW_ADDR}; 
+									end
+									else NOP();
+								end
+								else NOP();
+							end
+							else if ( burstRead_done && burstWrite_done ) begin
+								PRE(RP);
+								state <= IDLE;
+							end
+							else NOP();
 						end
-							/*
-							* 
-							*/
-					end
-					READ: begin
-						if (burst_read_ready) valid_in <= 0;
-						if (burst_pre_ready) begin
-							PRE(RP);
-							state <= IDLE;	
-						end											
 						else NOP();
-							
-					end
-					WRITE: begin
-						PRE(RP);
-						state <= IDLE;
 					end
 				endcase	
 			end
@@ -260,28 +407,43 @@
 			       	NOP();
 				counter <= counter + 1;
 			end
-			
-			//	BURST LOGIC	
-			// ---------------------------------------------------
 
-			burst_counter <= (burst_counter == burst_finish) ? burst_counter : 
-									   burst_counter + 1;
+			//	BURST LOGIC
+			// ------------------------------------------------------------------------
 
-			//	valid signal pipeline	
+			burstRead_counter <= (burstRead_read_ready) ? 	burstRead_counter : 
+									   burstRead_counter + 1;
+
+			//	BURST READ 
+			//	----------
 			
 			valid_pipe[7:1] <= {valid_pipe[6:1], valid_in};
 			valid <= valid_pipe[CAS]; 
 
-			//----------------------------------------------------
+			// -----------------------------------------------------------------------			
+			// 	BURST WRITE
+			// 	-----------
+			burstWrite_counter <= (burstWrite_counter == burstWrite_finish) ? burstWrite_counter : 
+											  burstWrite_counter + 1;
+			_data_in <= fifo_data_in;
 			end
 		end
 
-		task BURST_START;
+		task BURST_WRITE_START;
 			begin
-				burst_finish <= burst_finish + BURST_LENGTH - 1;	
+				burstWrite_finish <= BURST_WR_MODE ? burstWrite_finish + BURST_LENGTH : burstWrite_finish + 1;	
+
+
+			end
+		endtask
+
+		task BURST_READ_START;
+			begin
+				burstRead_finish <= burstRead_finish + BURST_LENGTH - 1;	
 				valid_in <= 1;
 			end
 		endtask
+
 
 		task NOP;
 			begin
@@ -289,6 +451,8 @@
 				DRAM_nRAS <= 1;
 				DRAM_nCAS <= 1;
 				DRAM_nWE <= 1;	
+
+				valid_in <= burstRead_read_ready ? 0 : valid_in; 
 			end
 		endtask
 		
@@ -332,7 +496,7 @@
 							BURST_LENGTH == 4 ? 2 :
 							BURST_LENGTH == 8 ? 3 : 0;	
 
-				`LOAD_BURST_TYPE <= INTERLEAVED;
+				`LOAD_BURST_TYPE <=	BURST_TYPE == "INTR" ? 1 : 0;
 				`LOAD_BURST_WR_MODE <=	BURST_WR_MODE == 1 ? 0 : 1;
 				`LOAD_CAS <= 		CAS;
 
@@ -351,6 +515,8 @@
 
 				delay <= _delay;
 				counter <= 0;
+				
+				valid_in <= burstRead_read_ready ? 0 : valid_in;
 			end
 		endtask
 
@@ -370,7 +536,7 @@
 		endtask
 
 		task DO_WRITE(input integer _delay);
-			begin
+		       	begin
 				DRAM_nCS <= 0;
 				DRAM_nRAS <= 1; 
 				DRAM_nCAS <= 0;
@@ -381,6 +547,9 @@
 
 				delay <= _delay;
 				counter <= 0;
+
+
+				valid_in <= burstRead_read_ready ? 0 : valid_in;
 			end
 		endtask
 
@@ -395,6 +564,8 @@
 				
 				delay <= _delay;
 				counter <= 0;
+
+				valid_in <= burstRead_read_ready ? 0 : valid_in;
 			end
 		endtask
 /*
@@ -420,5 +591,7 @@
 		endfunction
 
 	endmodule
+
+
 
 `endif
