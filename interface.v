@@ -1,62 +1,59 @@
-//burst write doesn't consider that DQ accepts data after cycle WRITE(), not at the same
-//
-`ifndef SDRAM_CTRL
 
+`ifndef SDRAM_CTRL
 	`define	SDRAM_CTRL
 
 	`include "synch_fifo.v"
 
-								// designed for sdram from issi with speed -7 inside of terasic de10 lite 
+											// designed for sdram from issi with speed -7 inside of terasic de10 lite 
 	
 	`define LOAD_BURST_LENGTH	DRAM_ADDR[2:0]
 	`define LOAD_BURST_TYPE 	DRAM_ADDR[3]	
-	`define LOAD_CAS 		DRAM_ADDR[6:4]
+	`define LOAD_CAS 			DRAM_ADDR[6:4]
 	`define LOAD_BURST_WR_MODE 	DRAM_ADDR[9]
-							// internal address conventions
-	`define BANK_ADDR 		_address[24:23]
-	`define ROW_ADDR 		_address[22:10]
-        `define COLUMN_ADDR 		_address[9:0]	
+											// internal address conventions
+	`define BANK_ADDR 			_address[24:23]
+	`define ROW_ADDR 			_address[22:10]
+    `define COLUMN_ADDR 		_address[9:0]	
 
 	
 	module sdram_interface #(
-		parameter	CLK_FREQ=133, 		// 143 or 133
-				BURST_LENGTH = 4,
-				BURST_TYPE = "SEQ",  	// SEQ = sequential 
-						     	// INTR = interleaved	
-				BURST_WR_MODE = 0	// 0 = burst applied to READ operation only
-						       	// 1 = applied to both
+		parameter	CLK_FREQ=133, 			// 143 or 133
+					BURST_LENGTH = 4,
+					BURST_TYPE = "SEQ",  	// SEQ = sequential INTR = interleaved	
+					BURST_WR_MODE = 0		// 0 = burst applied to READ operation only
+						       				// 1 = applied to both
 	)(
-							// interface
-		output reg	valid, 			// ready for accepting command
-		output 		ready,
-		output [15:0]	data_out,
-		input  [24:0]	address,
-		input  [15:0]	data_in,
-		input 		read,
-		input 		write,
-		input 		clk,
-
-		`ifdef	TEST
-				start,
+											// interface
+		output reg			valid, 					
+		output 				ready,				// ready for accepting command
+		output [15:0]		data_out,
+		input  [24:0]		address,
+		input  [15:0]		data_in,
+		input 				read,
+		input 				write,
+		input 				clk,
+							reset,
+		
+		`ifdef TEST
+							start,
 		`endif
-				//turn_on,
-				reset,
+					
 
 							// SDRAM connections
 		inout      [15:0] 	DRAM_DQ,
 		output reg [12:0]	DRAM_ADDR,	
 		output reg [1:0] 	DRAM_BA,
-		output  		DRAM_CLK,
-		output reg 		DRAM_CKE,
+		output  			DRAM_CLK,
+		output reg 			DRAM_CKE,
 
 							//active low
 				
-		output reg 	DRAM_LDQM,  		
-				DRAM_HDQM,
-				DRAM_nWE,
-				DRAM_nCAS,
-				DRAM_nRAS,
-				DRAM_nCS
+		output reg 			DRAM_LDQM,  		
+							DRAM_HDQM,
+							DRAM_nWE,
+							DRAM_nCAS,
+							DRAM_nRAS,
+							DRAM_nCS
 
 	);
 
@@ -87,19 +84,19 @@
 
 
 		localparam 	PRE_PALL=0,
-				AREF=1,
-				PALL=2,
-				LMR=3,
-				INIT=4,
-				IDLE=5,
-				ACTIVE=6,
-				WRITE=7,
-				READ=8;
+					AREF=1,
+					PALL=2,
+					LMR=3,
+					INIT=4,
+					IDLE=5,
+					ACTIVE=6,
+					WRITE=7,
+					READ=8;
 				
 
 		reg [log2(AUTO_REFRESH_T)-1:0]	REFRESH_COUNTER; 
-		reg [log2(13300)-1:0] counter; 
-		reg [2:0] 	autoref_counter;
+		reg [log2(13300)-1:0] 			counter; 
+		reg [2:0] 						autoref_counter;
 
 
 		wire warn_signal = REFRESH_COUNTER >= WARNING;
@@ -107,42 +104,43 @@
 	
 	
 		wire	cmd_empty,
-			cmd_valid,
-			cmd_full;
+				cmd_valid,
+				cmd_full;
 			
 
 
  		// registering the input
 		// stop light for all operations, refresh is about to happen	
 			
-		reg [3:0]	delay,        		// delay parameter that can be passed between states
-			 	init_state,
-				state;
-		wire [24:0] 	_address;
-		reg [15:0] 	_data_in;
-		wire [15:0]	fifo_data_in;
-		wire 		_write,
-				_read;
+		reg [3:0]			delay,        		// delay parameter that can be passed between states
+			 				init_state,
+							state;
+		wire [24:0] 		_address;
+		reg [15:0] 			_data_in;
+		wire [15:0]			fifo_data_in;
+		wire 				_write,
+							_read;
 
 		wire [(2+13)-1:0]	current_bank_row  = {`BANK_ADDR, `ROW_ADDR};
 		reg [(2+13)-1:0]	prev_bank_row;
 
 
 
-		reg 	valid_in;
-		reg	[3:0] 	burstRead_counter,
-				burstRead_finish;
-		reg 	[7:0] 	valid_pipe;		
+		reg 				valid_in;
+		reg	[3:0] 			burstRead_counter,
+							burstRead_finish;
+		reg 	[7:0] 		valid_pipe;	
+
 		wire 	burstRead_read_ready 	= burstRead_counter == burstRead_finish;
-		wire 	burstRead_done 	  	= !( |{ valid_pipe[CAS:1], valid_in } ); 	// {valid_pipe[CAS:1], valid_in} == 0;
+		wire 	burstRead_done 	  		= !( |{ valid_pipe[CAS:1], valid_in } ); 	// {valid_pipe[CAS:1], valid_in} == 0;
 		wire 	burstRead_PRE_ready  	= burstRead_read_ready && !valid_pipe[CAS-RP:0];// assume RP < CAS always
 
 
 
 		reg	[3:0]	burstWrite_counter,
-				burstWrite_finish;
-		wire	burstWrite_done	= burstWrite_counter == burstWrite_finish;
-		wire 	burstWrite_PRE_ready = burstWrite_done;	// only for now
+					burstWrite_finish;
+		wire		burstWrite_done	= burstWrite_counter == burstWrite_finish;
+		wire 		burstWrite_PRE_ready = burstWrite_done;	// only for now
 
 
 
@@ -151,7 +149,7 @@
 		assign DRAM_CLK = clk;
 		assign data_out = DRAM_DQ;	
 
-		reg fetch;
+		reg 	fetch;
 
 
 		generate 
@@ -218,33 +216,12 @@
 		end
 		endgenerate
 
-	
-/*
-		wire fetch =	((((	state == ACTIVE 			) &&
-				(	prev_bank_row == current_bank_row	)) &&
-
-
-				(((	_write 					) &&
-				(	burstRead_done && burstWrite_done	)) || 
-
-				((	_read					) &&
-				(	burstWrite_done && burstRead_read_ready	)))) ||
-
-				(( 	state == IDLE && !refresh && !warn_signal	) &&
-				(	(!_write && !_read)	 		))) &&
-				(	delay == counter 			);
-
-*/				
-		
-	 
-
-
 
 		//	=============================================================
-		//  	||	COMMAND REGISTRATION 				   ||	
+		//  ||	COMMAND REGISTRATION 				   ||	
 		//  	---------------------------------------------------------------
 		// 	||	purpose: register every incoming command, save until ||
-		// 	||	they are execute
+		// 	||	they are execute									
 		// 	===============================================================
 				
 		synch_fifo #(
@@ -259,7 +236,7 @@
 		    .r_en      	( fetch ),
 		    .empty     	( cmd_empty ),
 		    .full      	( cmd_full ),
-		    .valid	( cmd_valid )
+		    .valid		( cmd_valid )
 		);
 		
 
@@ -411,9 +388,8 @@
 			//	BURST LOGIC
 			// ------------------------------------------------------------------------
 
-			burstRead_counter <= (burstRead_read_ready) ? 	burstRead_counter : 
-									   burstRead_counter + 1;
-
+			burstRead_counter <= (burstRead_read_ready) ? 	burstRead_counter : burstRead_counter + 1;
+									   
 			//	BURST READ 
 			//	----------
 			
@@ -423,8 +399,7 @@
 			// -----------------------------------------------------------------------			
 			// 	BURST WRITE
 			// 	-----------
-			burstWrite_counter <= (burstWrite_counter == burstWrite_finish) ? burstWrite_counter : 
-											  burstWrite_counter + 1;
+			burstWrite_counter <= (burstWrite_counter == burstWrite_finish) ? burstWrite_counter : burstWrite_counter + 1;					  
 			_data_in <= fifo_data_in;
 			end
 		end
@@ -439,133 +414,132 @@
 
 		task BURST_READ_START;
 			begin
-				burstRead_finish <= burstRead_finish + BURST_LENGTH - 1;	
-				valid_in <= 1;
+				burstRead_finish 	<= burstRead_finish + BURST_LENGTH - 1;	
+				valid_in 			<= 1;
 			end
 		endtask
 
 
 		task NOP;
 			begin
-				DRAM_nCS <= 0;
-				DRAM_nRAS <= 1;
-				DRAM_nCAS <= 1;
-				DRAM_nWE <= 1;	
+				DRAM_nCS 	<= 0;
+				DRAM_nRAS 	<= 1;
+				DRAM_nCAS	<= 1;
+				DRAM_nWE 	<= 1;	
 
-				valid_in <= burstRead_read_ready ? 0 : valid_in; 
+				valid_in 	<= burstRead_read_ready ? 0 : valid_in; 
 			end
 		endtask
 		
 		task DO_PALL(input integer _delay);
 			begin
-				DRAM_nCS <= 0;
-				DRAM_nRAS <= 0; 
-				DRAM_nCAS <= 1;
-				DRAM_nWE <= 0;	
-				DRAM_ADDR[10] <= 1;
-				counter <= 0;
+				DRAM_nCS 		<= 0;
+				DRAM_nRAS		<= 0; 
+				DRAM_nCAS 		<= 1;
+				DRAM_nWE 		<= 0;	
+				DRAM_ADDR[10] 	<= 1;
+				counter 		<= 0;
 
-				delay <= _delay; 
+				delay 			<= _delay; 
 			end
 
 		endtask
 
 		task DO_AREF(input integer _delay);
 			begin
-				DRAM_CKE <= 1;
-				DRAM_nCS <= 0;
-				DRAM_nRAS <= 0; 
-				DRAM_nCAS <= 0;
-				DRAM_nWE <= 1;	
-				counter <= 0;			
-				delay <= _delay;
+				DRAM_CKE 	<= 1;
+				DRAM_nCS 	<= 0;
+				DRAM_nRAS 	<= 0; 
+				DRAM_nCAS 	<= 0;
+				DRAM_nWE 	<= 1;	
+				counter 	<= 0;			
+				delay 		<= _delay;
 			end
 		endtask	
 
 		task DO_LMR(input integer _delay);
 			begin
-				DRAM_nCS <= 0;
-				DRAM_nRAS <= 0; 
-				DRAM_nCAS <= 0;
-				DRAM_nWE <= 0;	
-				DRAM_BA <= 0;
-				delay <= _delay;
-
+				DRAM_nCS 	<= 0;
+				DRAM_nRAS 	<= 0; 
+				DRAM_nCAS 	<= 0;
+				DRAM_nWE 	<= 0;	
+				DRAM_BA 	<= 0;
+				delay 		<= _delay;
+				counter 	<= 0;	
+				
 				`LOAD_BURST_LENGTH <=	BURST_LENGTH == 1 ? 0 :
-							BURST_LENGTH == 2 ? 1 :
-							BURST_LENGTH == 4 ? 2 :
-							BURST_LENGTH == 8 ? 3 : 0;	
+										BURST_LENGTH == 2 ? 1 :
+										BURST_LENGTH == 4 ? 2 :
+										BURST_LENGTH == 8 ? 3 : 0;	
 
-				`LOAD_BURST_TYPE <=	BURST_TYPE == "INTR" ? 1 : 0;
+				`LOAD_BURST_TYPE 	<=	BURST_TYPE == "INTR" ? 1 : 0;
 				`LOAD_BURST_WR_MODE <=	BURST_WR_MODE == 1 ? 0 : 1;
-				`LOAD_CAS <= 		CAS;
-
-				counter <= 0;			
+				`LOAD_CAS 			<= 	CAS;
 			end
 		endtask	
 
 		task DO_ACTIVE(input integer _delay);
 			begin
-				DRAM_nCS <= 0;
-				DRAM_nRAS <= 0; 
-				DRAM_nCAS <= 1;
-				DRAM_nWE <= 1;	
-				DRAM_BA <= `BANK_ADDR;
-				DRAM_ADDR <= `ROW_ADDR;	
+				DRAM_nCS	<= 0;
+				DRAM_nRAS 	<= 0; 
+				DRAM_nCAS 	<= 1;
+				DRAM_nWE  	<= 1;	
+				DRAM_BA 	<= `BANK_ADDR;
+				DRAM_ADDR 	<= `ROW_ADDR;	
 
-				delay <= _delay;
-				counter <= 0;
+				delay 		<= _delay;
+				counter 	<= 0;
 				
-				valid_in <= burstRead_read_ready ? 0 : valid_in;
+				valid_in 	<= burstRead_read_ready ? 0 : valid_in;
 			end
 		endtask
 
 		task DO_READ(input integer _delay);
 			begin
-				DRAM_nCS <= 0;
-				DRAM_nRAS <= 1; 
-				DRAM_nCAS <= 0;
-				DRAM_nWE <= 1;			
-				DRAM_BA <= `BANK_ADDR;
-				DRAM_ADDR[9:0] <= `COLUMN_ADDR;
-				DRAM_ADDR[10] <= 0; // fixed for now
+				DRAM_nCS 		<= 0;
+				DRAM_nRAS 		<= 1; 
+				DRAM_nCAS 		<= 0;
+				DRAM_nWE 		<= 1;			
+				DRAM_BA 		<= `BANK_ADDR;
+				DRAM_ADDR[9:0] 	<= `COLUMN_ADDR;
+				DRAM_ADDR[10] 	<= 0; // fixed for now
 
-				counter <= 0;
-				delay <= _delay;
+				counter 		<= 0;
+				delay 			<= _delay;
 			end
 		endtask
 
 		task DO_WRITE(input integer _delay);
 		       	begin
-				DRAM_nCS <= 0;
-				DRAM_nRAS <= 1; 
-				DRAM_nCAS <= 0;
-				DRAM_nWE <= 0;			
-				DRAM_BA <= `BANK_ADDR;
-				DRAM_ADDR[9:0] <= `COLUMN_ADDR;
-				DRAM_ADDR[10] <= 0; // fixed for now
+				DRAM_nCS 		<= 0;
+				DRAM_nRAS 		<= 1; 
+				DRAM_nCAS 		<= 0;
+				DRAM_nWE 		<= 0;			
+				DRAM_BA 		<= `BANK_ADDR;
+				DRAM_ADDR[9:0] 	<= `COLUMN_ADDR;
+				DRAM_ADDR[10] 	<= 0; // fixed for now
 
-				delay <= _delay;
-				counter <= 0;
+				delay 			<= _delay;
+				counter 		<= 0;
 
 
-				valid_in <= burstRead_read_ready ? 0 : valid_in;
+				valid_in 		<= burstRead_read_ready ? 0 : valid_in;
 			end
 		endtask
 
 		task PRE(input integer _delay);
 			begin
-				DRAM_nCS <= 0;
-				DRAM_nRAS <= 0; 
-				DRAM_nCAS <= 1;
-				DRAM_nWE <= 0;						
-				DRAM_ADDR[10] <= 0;
-				DRAM_BA <= `BANK_ADDR;
+				DRAM_nCS 		<= 0;
+				DRAM_nRAS 		<= 0; 
+				DRAM_nCAS 		<= 1;
+				DRAM_nWE 		<= 0;						
+				DRAM_ADDR[10] 	<= 0;
+				DRAM_BA 		<= `BANK_ADDR;
 				
-				delay <= _delay;
-				counter <= 0;
+				delay 			<= _delay;
+				counter 		<= 0;
 
-				valid_in <= burstRead_read_ready ? 0 : valid_in;
+				valid_in 		<= burstRead_read_ready ? 0 : valid_in;
 			end
 		endtask
 /*
