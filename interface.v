@@ -144,7 +144,7 @@
 
 
 
-		assign ready 	= !cmd_full && ( state != INIT ) && !warn_signal && !refresh;
+		assign ready 	= !cmd_full && ( state != INIT );
 		assign DRAM_DQ 	= !burstWrite_done ? _data_in : 16'bz;
 		assign DRAM_CLK = clk;
 		assign data_out = DRAM_DQ;	
