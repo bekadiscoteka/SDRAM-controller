@@ -1,4 +1,4 @@
-# SDRAM Controller for Terasic DE10-Lite
+# SDRAM Controller 
 
 A Verilog controller for the ISSI IS42S16320D (-7) SDRAM on the DE10-Lite
 board. It handles power-up initialization, auto-refresh and burst reads and
